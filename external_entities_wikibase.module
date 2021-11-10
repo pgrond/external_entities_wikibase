@@ -1,0 +1,55 @@
+<?php
+
+use Drupal\Core\Form\FormStateInterface;
+
+/**
+ * Implements hook_form_alter().
+ */
+function external_entities_wikibase_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  if ($form_id !== 'external_entity_type_edit_form') {
+    return;
+  }
+  // The id field is hard coded for now, because we use that in rewriting the
+  // SPARQL query.
+  $form['field_mappings']['id']['#default_value'] = 'id';
+  $form['field_mappings']['id']['#disabled'] = TRUE;
+}
+
+
+/**
+ * Implements hook_cron().
+ *
+ * Get the updated id's from Wikibase since last cron job run
+ * and mark those for reindexing.
+ * TODO implement deletions from wikibase.
+ */
+function external_entities_wikibase_cron() {
+  /**  @var \Drupal\external_entities\Entity\ExternalEntityType $external_entity_type */
+  foreach (\Drupal::entityTypeManager()->getStorage('external_entity_type')->loadMultiple() as $storage_id => $external_entity_type) {
+    if ($external_entity_type->getStorageClientId() !== 'wikibase') {
+      continue;
+    }
+    $storage = \Drupal::entityTypeManager()->getStorage($storage_id);
+    /** @var \Drupal\external_entities\Entity\Query\External\Query */
+    $query = $storage->getQuery();
+    // If this is the first time we are running this cron job, we don't
+    // have a last update time stored. Use the last change date from the
+    // tracked search api items as start.
+    $last_update = \Drupal::state()->get('external_entities_search_api_last_update');
+    if (!$last_update) {
+      $last_update = \Drupal::database()->select('search_api_item', 'i')->fields('i', ['changed'])->distinct()->orderBy('changed', 'DESC')->range(0, 1)->execute()->fetchField();
+    }
+    $last_update = date('Y-m-d\TH:i:s', $last_update);
+    $query->setParameter('change', '"' . $last_update . '"^^xsd:dateTime', '>=');
+    // Update the tracking time.
+    \Drupal::state()->set('external_entities_search_api_last_update', time());
+    $items = $query->execute();
+    /** @var QueueFactory $queue_factory */
+    $queue_factory = \Drupal::service('queue');
+    /** @var QueueInterface $queue */
+    $queue = $queue_factory->get('external_entities_wikibase_search_api_queue');
+    foreach ($items as $item) {
+      $queue->createItem(['id' => $item, 'storage' => $storage_id]);
+    }
+  }
+}
