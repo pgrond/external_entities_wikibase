@@ -9,6 +9,10 @@ function external_entities_wikibase_form_alter(&$form, FormStateInterface $form_
   if ($form_id !== 'external_entity_type_edit_form') {
     return;
   }
+  $form['read_only']['#default_value'] = TRUE;
+  $form['read_only']['#disabled'] = TRUE;
+  $form['read_only']['#description'] = t('We don\'t support writing to wikibase at the moment.');
+
   // The id field is hard coded for now, because we use that in rewriting the
   // SPARQL query.
   $form['field_mappings']['id']['#default_value'] = 'id';
