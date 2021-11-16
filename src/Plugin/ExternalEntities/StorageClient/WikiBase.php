@@ -1,9 +1,22 @@
 <?php
 
+/**
+ * @file
+ * Contains \Drupal\external_entities_wikibase\Plugin\StorageClient\Wikibase.
+ */
+
 namespace Drupal\external_entities_wikibase\Plugin\ExternalEntities\StorageClient;
 
+use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Queue\QueueFactory;
+use Drupal\Core\Queue\QueueInterface;
+use Drupal\Core\StringTranslation\TranslationInterface;
 use Drupal\external_entities\Plugin\ExternalEntities\StorageClient\Rest;
+use Drupal\external_entities\ResponseDecoder\ResponseDecoderFactoryInterface;
+use GuzzleHttp\ClientInterface;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
  * External entities storage client for wikibase endpoint.
@@ -18,14 +31,90 @@ class WikiBase extends Rest
 {
 
   /**
-   * Config values can not conatain periods, so we replace them with something else.
+   * The entity type manager.
+   *
+   * @var EntityTypeManagerInterface
+   */
+  protected $entityTypeManager;
+
+  /**
+   * The module handler service.
+   *
+   * @var ModuleHandlerInterface
+   */
+  protected $moduleHandler;
+
+  /**
+   * The queue factory.
+   *
+   * @var QueueFactory
+   */
+  protected $queueFactory;
+
+  /**
+   * Constructs a Rest object.
+   *
+   * @param array $configuration
+   *   A configuration array containing information about the plugin instance.
+   * @param string $plugin_id
+   *   The plugin_id for the plugin instance.
+   * @param mixed $plugin_definition
+   *   The plugin implementation definition.
+   * @param TranslationInterface $string_translation
+   *   The string translation service.
+   * @param ResponseDecoderFactoryInterface $response_decoder_factory
+   *   The response decoder factory service.
+   * @param ClientInterface $http_client
+   *   A Guzzle client object.
+   * @param EntityTypeManagerInterface $entity_type_manager
+   *   The entity type manager.
+   * @param ModuleHandlerInterface $module_handler
+   *   The module handler service.
+   */
+  public function __construct(
+    array $configuration,
+    $plugin_id,
+    $plugin_definition,
+    TranslationInterface $string_translation,
+    ResponseDecoderFactoryInterface $response_decoder_factory,
+    ClientInterface $http_client,
+    EntityTypeManagerInterface $entity_type_manager,
+    ModuleHandlerInterface $module_handler,
+    QueueFactory $queue_factory
+  ) {
+    parent::__construct($configuration, $plugin_id, $plugin_definition, $string_translation, $response_decoder_factory, $http_client);
+    $this->httpClient = $http_client;
+    $this->entityTypeManager = $entity_type_manager;
+    $this->moduleHandler = $module_handler;
+    $this->queueFactory = $queue_factory;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
+    return new static(
+      $configuration,
+      $plugin_id,
+      $plugin_definition,
+      $container->get('string_translation'),
+      $container->get('external_entities.response_decoder_factory'),
+      $container->get('http_client'),
+      $container->get('entity_type.manager'),
+      $container->get('module_handler'),
+      $container->get('queue'),
+    );
+  }
+
+  /**
+   * Config values can not contain periods, so we replace them with something else.
    */
   private const PERIOD_REPLACEMENT = '_-_';
 
   /**
    * {@inheritdoc}
    */
-  public function defaultConfiguration()
+  public function defaultConfiguration(): array
   {
     return [
       'endpoint' => NULL,
@@ -52,7 +141,8 @@ class WikiBase extends Rest
   /**
    * {@inheritdoc}
    */
-  public function buildConfigurationForm(array $form, FormStateInterface $form_state) {
+  public function buildConfigurationForm(array $form, FormStateInterface $form_state): array
+  {
     $form['sparql_endpoint'] = [
       '#type' => 'textfield',
       '#title' => $this->t('Sparql Endpoint'),
@@ -120,7 +210,19 @@ class WikiBase extends Rest
 
     $this->setConfiguration($form_state->getValues());
     parent::validateConfigurationForm($form, $form_state);
-
+    if ($form['parameters']['list']['#default_value'] !== $form_state->getValue(['parameters', 'list']) && $this->moduleHandler->moduleExists('search_api')) {
+      $indexes = $this->entityTypeManager->getStorage('search_api_index')->loadMultiple();
+      $entity_id = $form_state->getFormObject()->getEntity()->id();
+      foreach ($indexes as $index) {
+        assert($index instanceof \Drupal\search_api\Entity\Index);
+        if (array_key_exists("entity:$entity_id", $index->get('datasource_settings'))) {
+          // Off-load to a queue, so retracking will be run on cron and not directly at the end of the request.
+          $queue = $this->queueFactory->get('external_entities_wikibase_search_api_retrack_queue');
+          assert($queue instanceof QueueInterface);
+          $queue->createItem(['id' => $index->id()]);
+        }
+      }
+    }
   }
 
   /**
