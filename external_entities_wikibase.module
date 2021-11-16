@@ -1,6 +1,9 @@
 <?php
 
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Queue\QueueFactory;
+use Drupal\Core\Queue\QueueInterface;
+use Drupal\external_entities\Entity\ExternalEntityType;
 
 /**
  * Implements hook_form_alter().
@@ -28,14 +31,17 @@ function external_entities_wikibase_form_alter(&$form, FormStateInterface $form_
  * TODO implement deletions from wikibase.
  */
 function external_entities_wikibase_cron() {
-  /**  @var \Drupal\external_entities\Entity\ExternalEntityType $external_entity_type */
+  if (!\Drupal::moduleHandler()->moduleExists('search_api')) {
+    return;
+  }
   foreach (\Drupal::entityTypeManager()->getStorage('external_entity_type')->loadMultiple() as $storage_id => $external_entity_type) {
+    assert($external_entity_type instanceof ExternalEntityType);
     if ($external_entity_type->getStorageClientId() !== 'wikibase') {
       continue;
     }
     $storage = \Drupal::entityTypeManager()->getStorage($storage_id);
-    /** @var \Drupal\external_entities\Entity\Query\External\Query */
     $query = $storage->getQuery();
+    assert($query instanceof \Drupal\external_entities\Entity\Query\External\Query);
     // If this is the first time we are running this cron job, we don't
     // have a last update time stored. Use the last change date from the
     // tracked search api items as start.
@@ -48,10 +54,10 @@ function external_entities_wikibase_cron() {
     // Update the tracking time.
     \Drupal::state()->set('external_entities_search_api_last_update', time());
     $items = $query->execute();
-    /** @var QueueFactory $queue_factory */
     $queue_factory = \Drupal::service('queue');
-    /** @var QueueInterface $queue */
+    assert($queue_factory instanceof QueueFactory);
     $queue = $queue_factory->get('external_entities_wikibase_search_api_queue');
+    assert($queue instanceof QueueInterface);
     foreach ($items as $item) {
       $queue->createItem(['id' => $item, 'storage' => $storage_id]);
     }
